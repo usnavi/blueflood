@@ -40,6 +40,7 @@ import com.rackspacecloud.blueflood.outputs.formats.MetricData;
 import com.rackspacecloud.blueflood.rollup.Granularity;
 import com.rackspacecloud.blueflood.service.SlotState;
 import com.rackspacecloud.blueflood.types.*;
+import com.rackspacecloud.blueflood.utils.Util;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,7 +55,6 @@ public class AstyanaxReader extends AstyanaxIO {
     private static final String dataTypeCacheKey = MetricMetadata.TYPE.toString().toLowerCase();
 
     private static final Keyspace keyspace = getKeyspace();
-    private static final String UNKNOWN = "unknown";
 
     public static AstyanaxReader getInstance() {
         return INSTANCE;
@@ -299,15 +299,19 @@ public class AstyanaxReader extends AstyanaxIO {
     }
 
     public static String getUnitString(Locator locator) {
-        String unitString = null;
-        try {
-            unitString = metaCache.get(locator, MetricMetadata.UNIT.name().toLowerCase(), String.class);
-        } catch (CacheException ex) {
-            log.warn("Cache exception reading unitString from MetadataCache: ", ex);
+        String unitString = Util.UNKNOWN;
+        // Only grab units from cassandra, if we have to
+        if (!Util.shouldUseESForUnits()) {
+            try {
+                unitString = metaCache.get(locator, MetricMetadata.UNIT.name().toLowerCase(), String.class);
+            } catch (CacheException ex) {
+                log.warn("Cache exception reading unitString from MetadataCache: ", ex);
+            }
+            if (unitString == null) {
+                unitString = Util.UNKNOWN;
+            }
         }
-        if (unitString == null) {
-            unitString = UNKNOWN;
-        }
+
         return unitString;
     }
 
@@ -319,7 +323,7 @@ public class AstyanaxReader extends AstyanaxIO {
             log.warn("Cache exception reading type from MetadataCache. ", ex);
         }
         if (type == null) {
-            type = UNKNOWN;
+            type = Util.UNKNOWN;
         }
         return type;
     }
@@ -329,6 +333,9 @@ public class AstyanaxReader extends AstyanaxIO {
             Object type = metaCache.get(locator, dataTypeCacheKey);
             RollupType rollupType = RollupType.fromString(metaCache.get(locator, rollupTypeCacheKey));
 
+            if (rollupType == null) {
+                rollupType = RollupType.BF_BASIC;
+            }
             if (type == null) {
                 return getNumericOrStringRollupDataForRange(locator, range, gran, rollupType);
             }
@@ -364,9 +371,8 @@ public class AstyanaxReader extends AstyanaxIO {
         for (Locator locator : locators) {
             try {
                 RollupType rollupType = RollupType.fromString((String)
-                        metaCache.get(locator, MetricMetadata.ROLLUP_TYPE.name().toLowerCase()));
-                DataType dataType = new DataType((String)
-                        metaCache.get(locator, MetricMetadata.TYPE.name().toLowerCase()));
+                            metaCache.get(locator, MetricMetadata.ROLLUP_TYPE.name().toLowerCase()));
+                DataType dataType = getDataType(locator, MetricMetadata.TYPE.name().toLowerCase());
                 ColumnFamily cf = CassandraModel.getColumnFamily(rollupType, dataType, gran);
                 List<Locator> locs = locatorsByCF.get(cf);
                 locs.add(locator);
@@ -375,13 +381,13 @@ public class AstyanaxReader extends AstyanaxIO {
             }
         }
 
-        for (ColumnFamily CF : locatorsByCF.keySet()) {
+         for (ColumnFamily CF : locatorsByCF.keySet()) {
             List<Locator> locs = locatorsByCF.get(CF);
             Map<Locator, ColumnList<Long>> metrics = getColumnsFromDB(locs, CF, range);
             // transform columns to MetricData
             for (Locator loc : metrics.keySet()) {
                 MetricData data = transformColumnsToMetricData(loc, metrics.get(loc), gran);
-                if (data != null) {
+                if (data != null && data.getData() != null) {
                     results.put(loc, data);
                 }
             }
@@ -447,7 +453,7 @@ public class AstyanaxReader extends AstyanaxIO {
 
         for (Column<Long> column : results) {
             try {
-                points.add(pointFromColumn(column, gran, serializer));
+                points.add(pointFromColumn(column, serializer));
             } catch (RuntimeException ex) {
                 log.error("Problem deserializing data for " + locator + " (" + range + ") from " + CF.getName(), ex);
             }
@@ -460,7 +466,7 @@ public class AstyanaxReader extends AstyanaxIO {
     private MetricData getNumericOrStringRollupDataForRange(Locator locator, Range range, Granularity gran, RollupType rollupType) {
         Instrumentation.markScanAllColumnFamilies();
 
-        final MetricData metricData = getNumericMetricDataForRange(locator, range, gran, rollupType, DataType.DOUBLE);
+        final MetricData metricData = getNumericMetricDataForRange(locator, range, gran, rollupType, DataType.NUMERIC);
 
         if (metricData.getData().getPoints().size() > 0) {
             return metricData;
@@ -473,7 +479,7 @@ public class AstyanaxReader extends AstyanaxIO {
                                                                        Granularity gran) {
         try {
             RollupType rollupType = RollupType.fromString(metaCache.get(locator, rollupTypeCacheKey));
-            DataType dataType = new DataType(metaCache.get(locator, dataTypeCacheKey));
+            DataType dataType = getDataType(locator, dataTypeCacheKey);
             String unit = getUnitString(locator);
             MetricData.Type outputType = MetricData.Type.from(rollupType, dataType);
             Points points = getPointsFromColumns(columns, rollupType, dataType, gran);
@@ -484,20 +490,27 @@ public class AstyanaxReader extends AstyanaxIO {
         }
     }
 
+    private DataType getDataType(Locator locator, String dataTypeCacheKey) throws CacheException{
+        String meta = metaCache.get(locator, dataTypeCacheKey);
+        if (meta != null) {
+            return new DataType(meta);
+        }
+        return DataType.NUMERIC;
+    }
+
     private Points getPointsFromColumns(ColumnList<Long> columnList, RollupType rollupType,
                                         DataType dataType, Granularity gran) {
         Points points = new Points();
 
         AbstractSerializer serializer = serializerFor(rollupType, dataType, gran);
         for (Column<Long> column : columnList) {
-            points.add(new Points.Point(column.getName(), column.getValue(serializer)));
+            points.add(pointFromColumn(column, serializer));
         }
 
         return points;
     }
 
-    // todo: don't need gran anymore.
-    private Points.Point pointFromColumn(Column<Long> column, Granularity gran, AbstractSerializer serializer) {
+    private Points.Point pointFromColumn(Column<Long> column, AbstractSerializer serializer) {
         if (serializer instanceof NumericSerializer.RawSerializer)
             return new Points.Point(column.getName(), new SimpleNumber(column.getValue(serializer)));
         else

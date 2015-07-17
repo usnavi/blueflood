@@ -23,7 +23,6 @@ import com.rackspacecloud.blueflood.exceptions.SerializationException;
 import com.rackspacecloud.blueflood.http.HTTPRequestWithDecodedQueryParams;
 import com.rackspacecloud.blueflood.http.HttpRequestHandler;
 import com.rackspacecloud.blueflood.http.HttpResponder;
-import com.rackspacecloud.blueflood.io.AstyanaxReader;
 import com.rackspacecloud.blueflood.io.Constants;
 import com.rackspacecloud.blueflood.outputs.formats.MetricData;
 import com.rackspacecloud.blueflood.outputs.serializers.BatchedMetricsJSONOutputSerializer;
@@ -31,7 +30,6 @@ import com.rackspacecloud.blueflood.outputs.serializers.BatchedMetricsOutputSeri
 import com.rackspacecloud.blueflood.outputs.utils.PlotRequestParser;
 import com.rackspacecloud.blueflood.service.Configuration;
 import com.rackspacecloud.blueflood.service.HttpConfig;
-import com.rackspacecloud.blueflood.types.BatchMetricsQuery;
 import com.rackspacecloud.blueflood.types.Locator;
 import com.rackspacecloud.blueflood.outputs.utils.RollupsQueryParams;
 import com.rackspacecloud.blueflood.utils.TimeValue;
@@ -41,6 +39,8 @@ import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.ChannelHandlerContext;
 import org.jboss.netty.handler.codec.http.*;
 import org.json.simple.JSONObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -49,24 +49,20 @@ import java.util.Map;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-public class HttpMultiRollupsQueryHandler implements HttpRequestHandler {
+public class HttpMultiRollupsQueryHandler extends RollupHandler implements HttpRequestHandler {
+    private static final Logger log = LoggerFactory.getLogger(HttpMultiRollupsQueryHandler.class);
     private final BatchedMetricsOutputSerializer<JSONObject> serializer;
     private final Gson gson;           // thread-safe
     private final JsonParser parser;   // thread-safe
     private final Timer httpBatchMetricsFetchTimer = Metrics.timer(HttpMultiRollupsQueryHandler.class,
             "Handle HTTP batch request for metrics");
     private final ThreadPoolExecutor executor;
-    private final TimeValue queryTimeout;
     private final int maxMetricsPerRequest;
 
     public HttpMultiRollupsQueryHandler() {
         Configuration config = Configuration.getInstance();
         int maxThreadsToUse = config.getIntegerProperty(HttpConfig.MAX_READ_WORKER_THREADS);
         int maxQueueSize = config.getIntegerProperty(HttpConfig.MAX_BATCH_READ_REQUESTS_TO_QUEUE);
-        this.queryTimeout = new TimeValue(
-                config.getIntegerProperty(HttpConfig.BATCH_QUERY_TIMEOUT),
-                TimeUnit.SECONDS
-        );
         this.maxMetricsPerRequest = config.getIntegerProperty(HttpConfig.MAX_METRICS_PER_BATCH_QUERY);
         this.serializer = new BatchedMetricsJSONOutputSerializer();
         this.gson = new GsonBuilder().setPrettyPrinting().serializeNulls().create();
@@ -93,10 +89,11 @@ public class HttpMultiRollupsQueryHandler implements HttpRequestHandler {
             return;
         }
 
-        List<Locator> locators;
+        List<String> locators = new ArrayList<String>();
         try {
-            locators = getLocatorsFromJSONBody(tenantId, body);
+            locators.addAll(getLocatorsFromJSONBody(tenantId, body));
         } catch (Exception ex) {
+            log.debug(ex.getMessage(), ex);
             sendResponse(ctx, request, ex.getMessage(), HttpResponseStatus.BAD_REQUEST);
             return;
         }
@@ -108,38 +105,37 @@ public class HttpMultiRollupsQueryHandler implements HttpRequestHandler {
         }
 
         HTTPRequestWithDecodedQueryParams requestWithParams = (HTTPRequestWithDecodedQueryParams) request;
-
         final Timer.Context httpBatchMetricsFetchTimerContext = httpBatchMetricsFetchTimer.time();
         try {
             RollupsQueryParams params = PlotRequestParser.parseParams(requestWithParams.getQueryParams());
-            BatchMetricsQuery query = new BatchMetricsQuery(locators, params.getRange(), params.getGranularity());
-            Map<Locator, MetricData> results = new BatchMetricsQueryHandler(executor, AstyanaxReader.getInstance())
-                                                        .execute(query, queryTimeout);
+            Map<Locator, MetricData> results = getRollupByGranularity(tenantId, locators, params.getRange().getStart(), params.getRange().getStop(), params.getGranularity());
             JSONObject metrics = serializer.transformRollupData(results, params.getStats());
             final JsonElement element = parser.parse(metrics.toString());
             final String jsonStringRep = gson.toJson(element);
             sendResponse(ctx, request, jsonStringRep, HttpResponseStatus.OK);
         } catch (InvalidRequestException e) {
+            log.debug(e.getMessage());
             sendResponse(ctx, request, e.getMessage(), HttpResponseStatus.BAD_REQUEST);
         } catch (SerializationException e) {
+            log.debug(e.getMessage(), e);
             sendResponse(ctx, request, e.getMessage(), HttpResponseStatus.INTERNAL_SERVER_ERROR);
         } catch (Exception e) {
+            log.error(e.getMessage(), e);
             sendResponse(ctx, request, e.getMessage(), HttpResponseStatus.INTERNAL_SERVER_ERROR);
         } finally {
             httpBatchMetricsFetchTimerContext.stop();
         }
     }
 
-    private List<Locator> getLocatorsFromJSONBody(String tenantId, String body) {
+    private List<String> getLocatorsFromJSONBody(String tenantId, String body) {
         JsonElement element = gson.fromJson(body, JsonElement.class);
         JsonArray metrics = element.getAsJsonArray();
-        final List<Locator> locators = new ArrayList<Locator>();
+        final List<String> locators = new ArrayList<String>();
 
         Iterator<JsonElement> it = metrics.iterator();
         while (it.hasNext()) {
             JsonElement metricElement = it.next();
-            Locator loc = Locator.createLocatorFromPathComponents(tenantId, metricElement.getAsString());
-            locators.add(loc);
+            locators.add( metricElement.getAsString());
         }
 
         return locators;

@@ -27,6 +27,7 @@ import com.rackspacecloud.blueflood.types.Rollup;
 import com.rackspacecloud.blueflood.types.SetRollup;
 import com.rackspacecloud.blueflood.types.SimpleNumber;
 import com.rackspacecloud.blueflood.types.TimerRollup;
+import com.rackspacecloud.blueflood.utils.Util;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 import org.slf4j.Logger;
@@ -68,7 +69,7 @@ public class JSONBasicRollupsOutputSerializer implements BasicRollupsOutputSeria
         metaObject.put("next_href", null);
         globalJSON.put("values", valuesArray);
         globalJSON.put("metadata", metaObject);
-        globalJSON.put("unit", metricData.getUnit());
+        globalJSON.put("unit", metricData.getUnit() == null ? Util.UNKNOWN : metricData.getUnit());
 
         return globalJSON;
     }
@@ -126,7 +127,11 @@ public class JSONBasicRollupsOutputSerializer implements BasicRollupsOutputSeria
             numPoints += rollup.getCount().longValue();
             filterStatsObject = getFilteredStatsForRollup(rollup, filterStats);
         } else {
-            throw new SerializationException("Unsupported data type for Point");
+            String errString =
+              String.format("Unsupported datatype for Point %s",
+                point.getData().getClass());
+            log.error(errString);
+            throw new SerializationException(errString);
         }
 
         // Set all filtered stats to null if numPoints is 0
