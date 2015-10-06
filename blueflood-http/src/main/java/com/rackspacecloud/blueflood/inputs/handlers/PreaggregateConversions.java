@@ -20,7 +20,8 @@ import com.google.gson.internal.LazilyParsedNumber;
 import com.rackspacecloud.blueflood.inputs.handlers.wrappers.AggregatedPayload;
 import com.rackspacecloud.blueflood.types.*;
 import com.rackspacecloud.blueflood.utils.TimeValue;
-
+import com.rackspacecloud.blueflood.service.Configuration;
+import com.rackspacecloud.blueflood.service.TtlConfig;
 import java.io.IOError;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -30,17 +31,17 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 public class PreaggregateConversions {
-    
+
     // todo: punt on TTL
-    private static final TimeValue DEFAULT_TTL = new TimeValue(48, TimeUnit.HOURS);
+    private static final TimeValue DEFAULT_TTL =  new TimeValue(Configuration.getInstance().getIntegerProperty(TtlConfig.TTL_CONFIG_CONST), TimeUnit.DAYS);
     private static final String NAME_DELIMITER = "//.";
-    
+
     // NOTE: when you create objects from gson-converted json, you need to make sure to resolve numbers that
     // are not accessed via `doubleValue()` or `longValue()`, i.e., they are treated as `Number` instances.
     // the Number supplied by gson is and instance of LazilyParsedNumber and will cause breakage in certain
     // circumstances. e.g. calling `longValue()` when the number is obviously a double, or is used in the
     // type comparisions we use to determine how to serialize a number.
-    
+
     public static Collection<IMetric> buildMetricsCollection(AggregatedPayload payload) {
         Collection<IMetric> metrics = new ArrayList<IMetric>();
         metrics.addAll(PreaggregateConversions.convertCounters(payload.getTenantId(), payload.getTimestamp(), payload.getFlushIntervalMillis(), payload.getCounters()));
@@ -67,7 +68,7 @@ public class PreaggregateConversions {
         }
         return list;
     }
-    
+
     public static Collection<PreaggregatedMetric> convertGauges(String tenant, long timestamp, Collection<BluefloodGauge> gauges) {
         List<PreaggregatedMetric> list = new ArrayList<PreaggregatedMetric>(gauges.size());
         for (BluefloodGauge gauge : gauges) {
@@ -80,11 +81,11 @@ public class PreaggregateConversions {
                 list.add(metric);
             } catch (IOException ex) {
                 throw new IOError(ex);
-            }   
+            }
         }
         return list;
     }
-    
+
     public static Collection<PreaggregatedMetric> convertTimers(String tenant, long timestamp, Collection<BluefloodTimer> timers) {
         List<PreaggregatedMetric> list = new ArrayList<PreaggregatedMetric>(timers.size());
         for (BluefloodTimer timer : timers) {
@@ -109,7 +110,7 @@ public class PreaggregateConversions {
         }
         return list;
     }
-    
+
     public static Collection<PreaggregatedMetric> convertSets(String tenant, long timestamp, Collection<BluefloodSet> sets) {
         List<PreaggregatedMetric> list = new ArrayList<PreaggregatedMetric>(sets.size());
         for (BluefloodSet set : sets) {
@@ -123,7 +124,7 @@ public class PreaggregateConversions {
         }
         return list;
     }
-    
+
     // resolve a number to a Long or double.
     public static Number resolveNumber(Number n) {
         if (n instanceof LazilyParsedNumber) {
