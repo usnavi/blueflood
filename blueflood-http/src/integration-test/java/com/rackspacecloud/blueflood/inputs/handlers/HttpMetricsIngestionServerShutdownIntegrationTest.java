@@ -35,10 +35,7 @@ import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.DefaultHttpClient;
 import org.apache.http.util.EntityUtils;
-import org.junit.Assert;
-import org.junit.BeforeClass;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.*;
 import org.junit.rules.ExpectedException;
 
 import java.net.ConnectException;
@@ -112,10 +109,18 @@ public class HttpMetricsIngestionServerShutdownIntegrationTest {
             HttpResponse response2 = client.execute(post2);
             Assert.fail("We should have received a Connect exception");
         } catch (ConnectException ex) {
+
+            // NOTE: ideally, one would simply use jUnit's `ExpectedException`
+            // rule or `expected` param to indicate that we expected a
+            // ConnectException to be thrown. However, ConnectException can be
+            // thrown for a number of different reasons, and the only way to
+            // know for sure that the connection was refused (and, thus, that
+            // the port is no longer open) is to catch the exception object and
+            // check its message. Hence, this try/catch.
+
             Assert.assertEquals("Connection refused", ex.getMessage());
         }
     }
-
 
     private URI getMetricsURI() throws URISyntaxException {
         return getMetricsURIBuilder().build();
@@ -124,6 +129,18 @@ public class HttpMetricsIngestionServerShutdownIntegrationTest {
     private URIBuilder getMetricsURIBuilder() throws URISyntaxException {
         return new URIBuilder().setScheme("http").setHost("127.0.0.1")
                 .setPort(httpPort).setPath("/v2.0/acTEST/ingest");
+    }
+
+    @AfterClass
+    public static void shutdown() {
+        Configuration.getInstance().setProperty(CoreConfig.EVENTS_MODULES.name(), "");
+        if (esSetup != null) {
+            esSetup.terminate();
+        }
+
+        if (vendor != null) {
+            vendor.shutdown();
+        }
     }
 
 }

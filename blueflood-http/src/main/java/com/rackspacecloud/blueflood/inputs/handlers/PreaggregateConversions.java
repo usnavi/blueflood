@@ -16,9 +16,13 @@
 
 package com.rackspacecloud.blueflood.inputs.handlers;
 
+import com.codahale.metrics.Meter;
+
 import com.google.gson.internal.LazilyParsedNumber;
 import com.rackspacecloud.blueflood.inputs.handlers.wrappers.AggregatedPayload;
+import com.rackspacecloud.blueflood.service.ExcessEnumReader;
 import com.rackspacecloud.blueflood.types.*;
+import com.rackspacecloud.blueflood.utils.Metrics;
 import com.rackspacecloud.blueflood.utils.TimeValue;
 import com.rackspacecloud.blueflood.service.Configuration;
 import com.rackspacecloud.blueflood.service.TtlConfig;
@@ -30,8 +34,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-public class PreaggregateConversions {
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+public class PreaggregateConversions {
+    private static final Logger log = LoggerFactory.getLogger(PreaggregateConversions.class);
+    private static final Meter excessEnumIngestedMeter = Metrics.meter(PreaggregateConversions.class, "ExcessEnumIngested");
+    
     // todo: punt on TTL
     private static final TimeValue DEFAULT_TTL =  new TimeValue(Configuration.getInstance().getIntegerProperty(TtlConfig.TTL_CONFIG_CONST), TimeUnit.DAYS);
     private static final String NAME_DELIMITER = "//.";
@@ -48,6 +57,7 @@ public class PreaggregateConversions {
         metrics.addAll(PreaggregateConversions.convertGauges(payload.getTenantId(), payload.getTimestamp(), payload.getGauges()));
         metrics.addAll(PreaggregateConversions.convertSets(payload.getTenantId(), payload.getTimestamp(), payload.getSets()));
         metrics.addAll(PreaggregateConversions.convertTimers(payload.getTenantId(), payload.getTimestamp(), payload.getTimers()));
+        metrics.addAll(PreaggregateConversions.convertEnums(payload.getTenantId(), payload.getTimestamp(), payload.getEnums()));
         return metrics;
     }
 
@@ -125,6 +135,23 @@ public class PreaggregateConversions {
         return list;
     }
 
+    public static Collection<PreaggregatedMetric> convertEnums(String tenant, long timestamp, Collection<BluefloodEnum> enums) {
+        List<PreaggregatedMetric> list = new ArrayList<PreaggregatedMetric>(enums.size());
+        for (BluefloodEnum en : enums) {
+            Locator locator = Locator.createLocatorFromPathComponents(tenant, en.getName().split(NAME_DELIMITER, -1));
+            if (!ExcessEnumReader.getInstance().isInExcessEnumMetrics(locator)) {
+                BluefloodEnumRollup rollup = new BluefloodEnumRollup();
+                rollup = rollup.withEnumValue(en.getValue(), 1L);
+                PreaggregatedMetric metric = new PreaggregatedMetric(timestamp, locator, DEFAULT_TTL, rollup);
+                list.add(metric);
+            } else {
+                log.warn("Skipping Ingest of Excess Enum Metric " + locator);
+                excessEnumIngestedMeter.mark();
+            }
+        }
+        return list;
+    }
+    
     // resolve a number to a Long or double.
     public static Number resolveNumber(Number n) {
         if (n instanceof LazilyParsedNumber) {
